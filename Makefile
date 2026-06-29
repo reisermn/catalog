@@ -84,6 +84,11 @@ sample: validate-inputs index-tds
 	$(PYTHON) scripts/02_match_catalog_to_tds.py --model $(MODEL) --sample $(SAMPLE)
 	$(PYTHON) scripts/03_enrich.py --model $(MODEL) --sample $(SAMPLE)
 
+## Export the TDS actually used (verified matches + manual links) into
+## data/output/used_tds/ plus a used_tds_list.csv, for uploading to the cloud.
+export-tds:
+	$(PYTHON) scripts/export_used_tds.py
+
 ## Delete all generated output files (leaves data/output/ directory intact)
 clean-output:
 	rm -f data/output/*.json data/output/*.csv data/output/*.md

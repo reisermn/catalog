@@ -141,7 +141,7 @@ def main() -> int:
           f"({len(manual)} manual link(s); ~{cached_at_start} candidate verification(s) cached). "
           f"Re-run after a failure to resume.", flush=True)
 
-    matches, review = [], []
+    matches, review, unmatched = [], [], []
     api_calls = 0
     try:
         for i, (r, norm, cands, best) in enumerate(enriched_targets, 1):
@@ -163,7 +163,7 @@ def main() -> int:
 
             # Verify candidates (fuzzy order); keep every VERIFIED one, stop early
             # only on a near-certain hit. Highest-confidence verified wins.
-            verified = []
+            verified, considered = [], []
             for entry, fscore in cands:
                 key = f"{item}||{entry['filename']}"
                 if key in cache:
@@ -174,12 +174,23 @@ def main() -> int:
                     api_calls += 1
                     if api_calls % 10 == 0:
                         lib.save_json(lib.MATCH_CACHE, cache)
+                considered.append((entry, fscore, res))
                 if res.get("verified") and res.get("confidence", 0) >= REVIEW_CONF:
                     verified.append((entry, fscore, res))
                     if res.get("confidence", 0) >= EARLY_ACCEPT:
                         break
 
             if not verified:
+                # record why nothing was accepted, for the unmatched report
+                top = max(considered, key=lambda c: c[2].get("confidence", 0)) if considered else None
+                unmatched.append({
+                    "Item": item, "Brand": brand,
+                    "candidates_considered": len(cands),
+                    "top_candidate": top[0]["filename"] if top else "",
+                    "top_verified": top[2].get("verified") if top else "",
+                    "top_confidence": top[2].get("confidence") if top else "",
+                    "top_reason": top[2].get("reason", "") if top else "",
+                })
                 print(f"[{i}/{n}] no-match {item[:60]} ({len(cands)} candidate(s))", flush=True)
                 continue
 
@@ -216,12 +227,19 @@ def main() -> int:
     lib.save_json(lib.MATCH_CACHE, cache)
     _write_csv(lib.MATCHES_CSV, matches)
     _write_review(lib.MATCH_REVIEW_CSV, review)
+    # the unmatched report is only authoritative on a full run
+    if not args.sample and not args.limit:
+        _write_unmatched(lib.UNMATCHED_CSV, unmatched)
 
     tier1 = sum(1 for m in matches if m["match_tier"] == 1)
+    with_cand = sum(1 for u in unmatched if u["candidates_considered"])
     print(f"Matched {len(matches)} item(s) ({tier1} tier-1, {len(review)} for review) "
           f"from {len(enriched_targets)} active-chemistry target(s). API calls: {api_calls}.")
     print(f"  {lib.MATCHES_CSV}")
     print(f"  {lib.MATCH_REVIEW_CSV}  <- set `approved` = NO to reject a tier-2/3 match")
+    if not args.sample and not args.limit:
+        print(f"  {lib.UNMATCHED_CSV}  <- {len(unmatched)} unmatched ({with_cand} had a "
+              f"rejected candidate worth a glance)")
     return 0
 
 
@@ -230,6 +248,22 @@ def _write_csv(path, recs) -> None:
             "confidence", "manufacturer_product_code", "canonical_product_name",
             "match_tier", "match_basis", "reason", "alternatives"]
     lib.OUTPUT.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=cols, extrasaction="ignore")
+        w.writeheader()
+        for r in recs:
+            w.writerow(r)
+
+
+def _write_unmatched(path, recs) -> None:
+    """Active chemistry that got no TDS. 'candidates_considered' > 0 with a
+    top_reason means a similar file was checked and rejected — scan those for any
+    real TDS that was wrongly rejected, then add it to manual_matches.csv."""
+    cols = ["Item", "Brand", "candidates_considered", "top_candidate",
+            "top_verified", "top_confidence", "top_reason"]
+    lib.OUTPUT.mkdir(parents=True, exist_ok=True)
+    # sort: items with a considered candidate first (most actionable), then the rest
+    recs = sorted(recs, key=lambda u: (-(u["candidates_considered"] or 0), u["Item"]))
     with open(path, "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=cols, extrasaction="ignore")
         w.writeheader()
