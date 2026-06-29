@@ -54,12 +54,12 @@ def main() -> int:
         snippet = extract_snippet(p)
         if not snippet:
             no_text += 1
-        stem = p.stem
         index.append({
             "filename": p.name,
             "rel_path": str(rel),
             "vendor": vendor,
-            "norm_filename": lib.normalize(stem),
+            "norm_filename": lib.normalize(p.stem),
+            "match_key": lib.tds_match_key(p.name),  # product-identity portion, for fuzzy matching
             "snippet": snippet,
         })
 

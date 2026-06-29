@@ -58,6 +58,33 @@ make sample           # runs 00, 01, then 02 + 03 on ~8 sampled items
 
 Inspect `data/output/catalog_tds_matches.csv` and `data/output/enriched.json`.
 
+### Recommended flow: review matches between 02 and 03
+
+A wrong TDS match produces wrong enrichment for that item *and* every legacy item
+that inherits from it, so the right place to review is **after matching, before
+enrichment**:
+
+```bash
+make validate-inputs index-tds   # 00, 01 (free)
+make match                       # 02 — match all active chemistry to TDS
+#   --> review data/output/catalog_match_review.csv
+make enrich assemble validate-output   # 03, 04, 05
+```
+
+**What to review.** Tier-1 matches (confidence ≥ 85, verified) are auto-accepted
+and need no action. Only the uncertain **tier-2/3** matches land in
+`catalog_match_review.csv`, each with the verifier's `reason`. In that file:
+
+| `approved` value | Effect |
+|---|---|
+| blank (default) | the match is **used** |
+| `NO` | the match is **rejected** — the item falls back to name-based inference instead of extracting from a TDS you don't trust |
+
+Edit `approved`, save, then run `make enrich ...`. Re-running `make match` later
+**preserves** your `approved` edits and costs nothing (cached). If you'd rather
+just run everything and review at the end, `make all` works too — every tier-2/3
+match is also surfaced in the final `catalog_review.csv`.
+
 ### Full run
 
 ```bash
@@ -77,6 +104,49 @@ make validate-output  # 05
 
 The final catalog is written to **`data/output/catalog_list.csv`**, with anything
 that needs a human eye in **`data/output/catalog_review.csv`**.
+
+### Progress & resuming
+
+The API stages (`match`, `enrich`) print a `[i/N]` line per item as they go, and
+save their disk cache every few calls. If a run dies partway (or you Ctrl-C it),
+**just run the same command again** — already-processed items are served from
+cache, so it picks up where it left off and costs nothing for the work already
+done.
+
+### Manually linking a TDS (when auto-matching misses one)
+
+Sometimes a product's TDS exists but the matcher won't confidently link it (an
+odd filename, an ambiguous variant). To force a link:
+
+1. Add a row to **`data/inputs/manual_matches.csv`**:
+
+   ```csv
+   Item,tds_filename
+   MacDermid Enova EF 587 AMR (gal),ENOVA EF 587
+   ```
+
+   `Item` is the exact catalog Item. `tds_filename` can be the exact filename **or
+   any unique substring of it** (so `ENOVA EF 587` finds
+   `ENOVA EF 587_MEIS_NA_12Jan24 (002).pdf`).
+
+2. Re-enrich just those rows:
+
+   ```bash
+   make enrich-items ITEMS="MacDermid Enova EF 587 AMR (gal)"
+   ```
+
+   (multiple items: separate with `||`). Then `make assemble validate-output` to
+   fold them into the catalog and propagate to any legacy items.
+
+A manual link always wins over auto-matching, is tagged `match_basis=manual`, and
+is also picked up automatically by a full `make match` / `make all`.
+
+### Re-running specific rows
+
+`make enrich-items ITEMS="..."` (or `python scripts/03_enrich.py --items "a||b"`,
+or `--items-file path`) re-enriches only the named items and **forces a fresh
+call** for each (ignores the cache for those rows) — useful after changing a
+manual link or a prompt. Everything else is untouched.
 
 ### Model selection
 

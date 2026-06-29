@@ -32,6 +32,7 @@ DATA = ROOT / "data"
 INPUTS = DATA / "inputs"
 CATALOG_CSV = INPUTS / "catalog_list.csv"
 TDS_DIR = INPUTS / "tds_ready"
+MANUAL_MATCHES = INPUTS / "manual_matches.csv"  # human-curated Item -> TDS links
 OUTPUT = DATA / "output"
 
 # Output artifacts
@@ -102,6 +103,7 @@ def normalize(name: str) -> str:
     """
     s = (name or "").lower()
     s = _PAREN.sub(" ", s)              # drop parenthetical size/brand info
+    s = s.replace("_", " ")            # underscores are token separators (MacDermid MEIS files)
     for prefix in sorted(_BRAND_PREFIXES, key=len, reverse=True):
         s = s.replace(prefix, " ")
     s = _SIZE_TOKEN.sub(" ", s)         # drop bare size tokens
@@ -109,6 +111,36 @@ def normalize(name: str) -> str:
     s = s.replace("-", " ")            # treat hyphen as space for token matching
     s = _WS.sub(" ", s).strip()
     return s
+
+
+# Filename tokens that carry no product identity (vendor/date/format noise).
+_FN_STOP = {"tds", "sds", "msds", "ds", "meis", "pds", "na", "eu", "gl", "en",
+            "letterhead", "new", "process", "operation", "guide", "send", "w",
+            "datasheet", "data", "sheet", "technical", "rev", "final", "002",
+            "003", "004"}
+_DATE_TOKEN = re.compile(r"^\d{1,2}[a-z]{3,4}\d{2,4}$")  # 12jan24, 5apr19, ...
+
+
+def clean_fname(norm: str) -> str:
+    """Drop filename noise tokens (format markers, vendor codes, dates)."""
+    return " ".join(t for t in norm.split()
+                    if t not in _FN_STOP and not _DATE_TOKEN.match(t)).strip()
+
+
+def tds_match_key(filename: str) -> str:
+    """
+    The product-identity portion of a TDS filename, normalized for matching.
+    MacDermid files are '<PRODUCT>_MEIS_<region>_<date>.pdf' — everything from
+    '_MEIS' on is vendor metadata, so cut it before normalizing.
+    """
+    stem = Path(filename).stem
+    low = stem.lower()
+    for marker in ("_meis", " meis", "_sds", " sds", "_msds", " msds"):
+        i = low.find(marker)
+        if i > 0:
+            stem = stem[:i]
+            break
+    return clean_fname(normalize(stem))
 
 
 # ---------------------------------------------------------------------------
@@ -277,3 +309,47 @@ def save_json(path: Path, obj) -> None:
     with open(path, "w", encoding="utf-8") as f:
         json.dump(obj, f, ensure_ascii=False, indent=2, sort_keys=True)
         f.write("\n")
+
+
+def load_manual_matches(index: list) -> dict:
+    """
+    Read data/inputs/manual_matches.csv (columns: Item, tds_filename) and resolve
+    each to an indexed TDS. The tds_filename may be the exact filename or any
+    unique substring of one (case-insensitive), so you can type 'ENOVA EF 587'
+    instead of the full vendor filename. Returns Item -> {tds_filename, rel_path}.
+    Unknown/ambiguous entries are warned and skipped.
+    """
+    out: dict = {}
+    if not MANUAL_MATCHES.exists():
+        return out
+    by_name = {e["filename"].lower(): e for e in index}
+    with open(MANUAL_MATCHES, newline="", encoding="utf-8-sig") as f:
+        for row in csv.DictReader(f):
+            item = (row.get("Item") or "").strip()
+            q = (row.get("tds_filename") or "").strip()
+            if not item or not q:
+                continue
+            e = by_name.get(q.lower())
+            if e is None:
+                hits = [x for x in index if q.lower() in x["filename"].lower()]
+                if len(hits) == 1:
+                    e = hits[0]
+                elif not hits:
+                    print(f"  manual_matches: no TDS file matches {q!r} (item {item!r}) — skipped")
+                    continue
+                else:
+                    print(f"  manual_matches: {q!r} matches {len(hits)} files — be more specific; skipped")
+                    continue
+            out[item] = {"tds_filename": e["filename"], "rel_path": e["rel_path"]}
+    return out
+
+
+def read_match_approvals(path: Path = MATCH_REVIEW_CSV) -> dict:
+    """Item -> approved value (upper-cased) from the match review file. A tier-2/3
+    match is rejected only when approved == 'NO'; blank means accept by default."""
+    out = {}
+    if path.exists():
+        with open(path, newline="", encoding="utf-8") as f:
+            for row in csv.DictReader(f):
+                out[row.get("Item", "")] = (row.get("approved") or "").strip().upper()
+    return out

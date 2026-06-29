@@ -181,7 +181,17 @@ def main() -> int:
     ap.add_argument("--sample", type=int, default=0,
                     help="enrich a small representative set covering every path")
     ap.add_argument("--limit", type=int, default=0)
+    ap.add_argument("--items", default="",
+                    help="re-enrich only these exact Item names, '||'-separated "
+                         "(forces a fresh call for each — ignores the per-item cache)")
+    ap.add_argument("--items-file", default="",
+                    help="like --items but one Item name per line in a file")
+    ap.add_argument("--new-tds-only", action="store_true",
+                    help="only items that now have a TDS match but weren't TDS-enriched "
+                         "before (i.e. newly matched since the last enrich run)")
     args = ap.parse_args()
+
+    only = _parse_items(args)
 
     _, rows = lib.load_catalog()
     active_items = {lib.g(r, "Item") for r in rows if lib.g(r, "status") == "active"}
@@ -201,36 +211,61 @@ def main() -> int:
         elif cat == "Chemistry" and is_orphan_legacy(r):
             work.append((r, "chem_infer"))
 
-    if args.sample:
+    if only:
+        found = {lib.g(r, "Item") for r, _ in work}
+        missing = [it for it in only if it not in found]
+        if missing:
+            print(f"WARNING: {len(missing)} requested item(s) not in the enrichable set "
+                  f"(legacy that inherits, or unknown): {missing[:5]}")
+        work = [(r, route) for r, route in work if lib.g(r, "Item") in only]
+    elif args.new_tds_only:
+        # items routed to TDS extraction whose stored record isn't TDS-based yet
+        prev = lib.load_json(lib.ENRICHED_JSON, default={})
+        work = [(r, route) for r, route in work
+                if route == "tds" and not prev.get(lib.g(r, "Item"), {}).get("tds_filename")]
+    elif args.sample:
         work = _sample(work)
     elif args.limit:
         work = work[:args.limit]
 
     cache = lib.load_json(lib.ENRICH_CACHE, default={})
     enriched = lib.load_json(lib.ENRICHED_JSON, default={})
-    errors = {}
+    errors = lib.load_json(lib.ENRICH_ERRORS, default={})
     client = lib.get_client()
     api_calls = 0
+    n = len(work)
+    cached = sum(1 for r, route in work if _cache_key(r, route, matches) in cache)
+    print(f"Enriching {n} item(s) ({cached} cached, ~{n - cached} to call). "
+          f"Re-run after a failure to resume.", flush=True)
 
-    for r, route in work:
-        item = lib.g(r, "Item")
-        try:
-            rec = _enrich_one(client, args.model, r, route, matches, cache)
-            if rec.get("_api"):
-                api_calls += 1
-            rec.pop("_api", None)
-            enriched[item] = rec
-            if api_calls and api_calls % 10 == 0:
-                lib.save_json(lib.ENRICH_CACHE, cache)
-                lib.save_json(lib.ENRICHED_JSON, enriched)
-        except Exception as e:  # keep going; log the failure
-            errors[item] = f"{type(e).__name__}: {e}"
+    try:
+        for i, (r, route) in enumerate(work, 1):
+            item = lib.g(r, "Item")
+            try:
+                rec = _enrich_one(client, args.model, r, route, matches, cache, force=bool(only))
+                api = rec.pop("_api", False)
+                if api:
+                    api_calls += 1
+                enriched[item] = rec
+                errors.pop(item, None)
+                print(f"[{i}/{n}] {route:12s} {'call ' if api else 'cache'} {item[:58]}", flush=True)
+                if api and api_calls % 10 == 0:
+                    lib.save_json(lib.ENRICH_CACHE, cache)
+                    lib.save_json(lib.ENRICHED_JSON, enriched)
+            except Exception as e:  # keep going; log the failure
+                errors[item] = f"{type(e).__name__}: {e}"
+                print(f"[{i}/{n}] {route:12s} ERROR {item[:58]} :: {e}", flush=True)
+    except KeyboardInterrupt:
+        lib.save_json(lib.ENRICH_CACHE, cache)
+        lib.save_json(lib.ENRICHED_JSON, enriched)
+        print("\nInterrupted — progress saved. Re-run to resume (cached items are skipped).")
+        return 130
 
     lib.save_json(lib.ENRICH_CACHE, cache)
     lib.save_json(lib.ENRICHED_JSON, enriched)
     lib.save_json(lib.ENRICH_ERRORS, errors)
 
-    print(f"Enriched {len(enriched)} item(s) (this run touched {len(work)}). "
+    print(f"Enriched {len(enriched)} item(s) total (this run touched {n}). "
           f"API calls: {api_calls}. Errors: {len(errors)}.")
     print(f"  {lib.ENRICHED_JSON}")
     if errors:
@@ -238,14 +273,31 @@ def main() -> int:
     return 0
 
 
-def _enrich_one(client, model, r, route, matches, cache) -> dict:
+def _cache_key(r, route, matches) -> str:
+    item = lib.g(r, "Item")
+    if route == "tds":
+        return f"tds::{item}::{matches[item]['tds_filename']}"
+    return f"{'chem' if route == 'chem_infer' else 'supply'}::{item}"
+
+
+def _parse_items(args) -> set:
+    items = set()
+    if args.items:
+        items |= {s.strip() for s in args.items.split("||") if s.strip()}
+    if args.items_file:
+        with open(args.items_file, encoding="utf-8") as f:
+            items |= {ln.strip() for ln in f if ln.strip()}
+    return items
+
+
+def _enrich_one(client, model, r, route, matches, cache, force=False) -> dict:
     item = lib.g(r, "Item")
     brand = lib.g(r, "Brand")
 
     if route == "tds":
         m = matches[item]
         key = f"tds::{item}::{m['tds_filename']}"
-        if key in cache:
+        if key in cache and not force:
             data = cache[key]; api = False
         else:
             user = [lib.pdf_block(lib.TDS_DIR / m["rel_path"]),
@@ -265,7 +317,7 @@ def _enrich_one(client, model, r, route, matches, cache) -> dict:
 
     elif route == "chem_infer":
         key = f"chem::{item}"
-        if key in cache:
+        if key in cache and not force:
             data = cache[key]; api = False
         else:
             user = [{"type": "text", "text": f"PRODUCT (catalog name): {item}\n"
@@ -282,7 +334,7 @@ def _enrich_one(client, model, r, route, matches, cache) -> dict:
 
     else:  # supply_infer
         key = f"supply::{item}"
-        if key in cache:
+        if key in cache and not force:
             data = cache[key]; api = False
         else:
             user = [{"type": "text", "text": f"ITEM (catalog name): {item}\n"
@@ -308,11 +360,32 @@ def _enrich_one(client, model, r, route, matches, cache) -> dict:
 
 
 def _read_matches() -> dict:
-    out = {}
+    """Confirmed matches to extract from. Tier-1 are always used; a tier-2/3 match
+    is honored unless it was rejected (approved == 'NO') in the review file — in
+    which case the item drops to the inference path instead. Manual links from
+    data/inputs/manual_matches.csv are merged on top (and always win), so you can
+    link an item and re-enrich it without re-running stage 02."""
+    approvals = lib.read_match_approvals()
+    out, rejected = {}, 0
     if lib.MATCHES_CSV.exists():
         with open(lib.MATCHES_CSV, newline="", encoding="utf-8") as f:
             for row in csv.DictReader(f):
+                if str(row.get("match_tier")) in ("2", "3") and \
+                        approvals.get(row["Item"], "") == "NO":
+                    rejected += 1
+                    continue
                 out[row["Item"]] = row
+    if rejected:
+        print(f"  (skipping {rejected} rejected tier-2/3 match(es) -> inference path)")
+
+    index = lib.load_json(lib.TDS_INDEX, default=[])
+    manual = lib.load_manual_matches(index)
+    for item, mm in manual.items():
+        out[item] = {"Item": item, "tds_filename": mm["tds_filename"],
+                     "rel_path": mm["rel_path"], "match_tier": "1", "confidence": "100",
+                     "match_basis": "manual", "manufacturer_product_code": ""}
+    if manual:
+        print(f"  ({len(manual)} manual link(s) applied)")
     return out
 
 

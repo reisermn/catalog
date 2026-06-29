@@ -57,6 +57,17 @@ match:
 enrich:
 	$(PYTHON) scripts/03_enrich.py --model $(MODEL)
 
+## Re-enrich only specific rows, e.g.:
+##   make enrich-items ITEMS="MacDermid Enova EF 587 AMR (gal)||Other Item (gal)"
+## Use after editing data/inputs/manual_matches.csv to link items to a TDS.
+enrich-items:
+	$(PYTHON) scripts/03_enrich.py --model $(MODEL) --items "$(ITEMS)"
+
+## Enrich only items that newly got a TDS match (weren't TDS-enriched before).
+## Run this after re-running `make match` to upgrade just the newly-matched items.
+enrich-new:
+	$(PYTHON) scripts/03_enrich.py --model $(MODEL) --new-tds-only
+
 ## 04 — Assemble final catalog with backward propagation to legacy items (no API)
 assemble:
 	$(PYTHON) scripts/04_assemble.py

@@ -98,6 +98,8 @@ reviewable:
 |---|---|
 | `product_code:<code>` | TDS confirmed by a literal manufacturer product-code hit (tier 1) |
 | `tds_verified` | TDS confirmed by the Claude verification pass (tier 1) |
+| `tds_verified_low_conf` | TDS verified but below the auto-accept bar (tier 2/3 — review) |
+| `manual` | TDS linked by hand in `data/inputs/manual_matches.csv` (tier 1) |
 | `llm_inference` | No TDS — attributes inferred from the name + domain knowledge |
 | `inherited_from_active` | Copied backward from the `superseded_by` active item |
 
