@@ -35,7 +35,9 @@ MODEL  ?= claude-sonnet-4-6
 SAMPLE ?= 8
 
 .PHONY: install validate-inputs index-tds match enrich assemble validate-output \
-        all sample clean-output help
+        all sample clean-output help export-tds export-tds-used index-tds-all \
+        match-unused-tds-dry-run match-unused-tds propose-new-items-dry-run \
+        propose-new-items
 
 ## Create the in-project .venv and install dependencies
 install:
@@ -88,6 +90,44 @@ sample: validate-inputs index-tds
 ## data/output/used_tds/ plus a used_tds_list.csv, for uploading to the cloud.
 export-tds:
 	$(PYTHON) scripts/export_used_tds.py
+
+# =============================================================================
+# catalog_active.csv / tds_all/ reconciliation (06-09)
+# =============================================================================
+# catalog_active.csv is the current reference template (data/inputs/). tds_all/
+# holds every TDS we have, including for products not yet in the catalog.
+#
+#   make export-tds-used     # 06: copy the TDS catalog_active.csv already uses (no API)
+#   make index-tds-all       # 07: index every PDF in tds_all/ (no API)
+#   make match-unused-tds-dry-run  # 08 preview: candidate counts, zero API calls
+#   make match-unused-tds    # 08: try to link unused TDS back to an existing row (API)
+#   make propose-new-items-dry-run # 09 preview: proposed groups, zero API calls
+#   make propose-new-items   # 09: propose new catalog rows for the rest (API)
+
+## 06 — Copy the TDS catalog_active.csv already references out of tds_all/ (no API)
+export-tds-used:
+	$(PYTHON) scripts/06_export_tds_used.py
+
+## 07 — Index every TDS in data/inputs/tds_all/ (no API)
+index-tds-all:
+	$(PYTHON) scripts/07_index_tds_all.py
+
+## 08 preview — candidate/cost preview for rematching unused TDS, no API calls
+## Add VENDOR=MacDermid (any tds_all/ folder name) to scope to one vendor.
+match-unused-tds-dry-run:
+	$(PYTHON) scripts/08_match_unused_tds.py --dry-run $(if $(VENDOR),--vendor "$(VENDOR)")
+
+## 08 — Try to match unused TDS back onto an existing catalog row (API)
+match-unused-tds:
+	$(PYTHON) scripts/08_match_unused_tds.py --model $(MODEL) $(if $(VENDOR),--vendor "$(VENDOR)")
+
+## 09 preview — proposed new-item groups, no API calls
+propose-new-items-dry-run:
+	$(PYTHON) scripts/09_propose_new_items.py --dry-run $(if $(VENDOR),--vendor "$(VENDOR)")
+
+## 09 — Propose new catalog rows for TDS with no existing match (API)
+propose-new-items:
+	$(PYTHON) scripts/09_propose_new_items.py --model $(MODEL) $(if $(VENDOR),--vendor "$(VENDOR)")
 
 ## Delete all generated output files (leaves data/output/ directory intact)
 clean-output:

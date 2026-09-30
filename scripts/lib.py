@@ -51,6 +51,47 @@ DEFAULT_MODEL = "claude-sonnet-4-6"
 DEFAULT_EFFORT = "high"  # correctness over cost on the per-item calls
 
 # ---------------------------------------------------------------------------
+# catalog_active.csv — the current reference template (20 columns). This is
+# a separate, newer spine from CATALOG_CSV/FINAL_CSV above: it's the
+# up-to-date, hand-curated catalog the 06+ scripts read from and compare
+# tds_all/ against. Never written to (data/inputs/ is read-only).
+# ---------------------------------------------------------------------------
+
+ACTIVE_CATALOG_CSV = INPUTS / "catalog_active.csv"
+TDS_ALL_DIR = INPUTS / "tds_all"
+
+# The exact column set/order of catalog_active.csv. Single source of truth so
+# every script that writes catalog-shaped rows (e.g. new-item proposals) stays
+# aligned with it. Anything outside this set is not part of the template.
+ACTIVE_CATALOG_COLUMNS = [
+    "Item Name", "Category", "Pricing Model", "Preferred Vendor", "QB Item ID",
+    "DOJ Controlled", "Manufacturer", "Manufacturer Product Code", "Is Commodity",
+    "Product Category", "Function Description", "Applicable Lines",
+    "Primary Line Position", "Primary Line Sub Position", "Use Type",
+    "System Name", "System Components", "Sequence Companions",
+    "Replenishment Role", "TDS Filename",
+]
+ACTIVE_CATEGORIES = ["Chemistry", "Supplies", "Equipment"]
+
+# Outputs for the tds_all reconciliation pipeline (06-09)
+TDS_USED_DIR = OUTPUT / "tds_used"
+TDS_USED_MANIFEST = OUTPUT / "tds_used_manifest.csv"
+TDS_ALL_INDEX = OUTPUT / "tds_all_index.json"
+TDS_REMATCH_CACHE = OUTPUT / "tds_rematch_cache.json"
+TDS_MATCHED_TO_EXISTING_CSV = OUTPUT / "tds_matched_to_existing.csv"
+TDS_REMATCH_REVIEW_CSV = OUTPUT / "tds_rematch_review.csv"
+TDS_UNMATCHED_JSON = OUTPUT / "tds_unmatched.json"
+NEW_ITEM_CACHE = OUTPUT / "new_item_cache.json"
+NEW_ITEM_ERRORS = OUTPUT / "new_item_errors.json"
+NEW_ITEM_PROPOSALS_CSV = OUTPUT / "proposed_new_items.csv"
+ACTIVE_CATALOG_UPDATED_CSV = OUTPUT / "catalog_active_updated.csv"
+
+
+def checked(v) -> str:
+    """catalog_active.csv's boolean convention: 'checked' or ''."""
+    return "checked" if v else ""
+
+# ---------------------------------------------------------------------------
 # Catalog I/O — preserve the exact 35-column header and row order
 # ---------------------------------------------------------------------------
 
@@ -345,12 +386,13 @@ def load_manual_matches(index: list) -> dict:
     return out
 
 
-def read_match_approvals(path: Path = MATCH_REVIEW_CSV) -> dict:
-    """Item -> approved value (upper-cased) from the match review file. A tier-2/3
-    match is rejected only when approved == 'NO'; blank means accept by default."""
+def read_match_approvals(path: Path = MATCH_REVIEW_CSV, key_col: str = "Item") -> dict:
+    """key_col value -> approved value (upper-cased) from a review file. A
+    tier-2/3 match is rejected only when approved == 'NO'; blank means accept
+    by default."""
     out = {}
     if path.exists():
         with open(path, newline="", encoding="utf-8") as f:
             for row in csv.DictReader(f):
-                out[row.get("Item", "")] = (row.get("approved") or "").strip().upper()
+                out[row.get(key_col, "")] = (row.get("approved") or "").strip().upper()
     return out
